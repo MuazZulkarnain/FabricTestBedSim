@@ -12,10 +12,11 @@ import signal
 logging.basicConfig(level=logging.INFO, format='[Endorser] %(message)s')
 logger = logging.getLogger()
 
-ORDERER_PORT = 7050  # Port to connect to on orderer nodes
-CLIENT_PORT = 7052    # Port to listen on for client connections
+ORDERER_PORT = 7050  # Port to connect to on orderer nodes (from endorser to orderer)
+CLIENT_PORT = 7052   # Port to listen on for client connections (from client to endorser)
 
-def send_to_orderer(transaction_data, orderer_ips):
+def send_to_orderer(transaction_data):
+    # Randomly select an orderer IP
     orderer_ip = random.choice(orderer_ips)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
@@ -28,9 +29,9 @@ def send_to_orderer(transaction_data, orderer_ips):
             else:
                 logger.info("No response from orderer")
     except Exception as e:
-        logger.error(f"Failed to send transaction to orderer: {e}")
+        logger.error(f"Failed to send transaction to orderer {orderer_ip}: {e}")
 
-def handle_client(conn, addr, orderer_ips):
+def handle_client(conn, addr):
     logger.info(f"Connection from client at {addr}")
     try:
         data = conn.recv(1024)
@@ -42,13 +43,13 @@ def handle_client(conn, addr, orderer_ips):
             # Send a response back to the client
             conn.sendall(b'Transaction endorsed by Endorser')
             # Forward the endorsed transaction to an orderer
-            send_to_orderer(transaction_proposal, orderer_ips)
+            send_to_orderer(transaction_proposal)
     except Exception as e:
         logger.error(f"Exception while handling client {addr}: {e}")
     finally:
         conn.close()
 
-def start_endorser(orderer_ips):
+def start_endorser():
     global server  # So it can be accessed in the signal handler
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     try:
@@ -61,11 +62,13 @@ def start_endorser(orderer_ips):
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        logger.info(f"Possible orderers: {orderer_ips}")
+
         while True:
             try:
                 conn, addr = server.accept()
                 # Handle each client connection in a new thread
-                threading.Thread(target=handle_client, args=(conn, addr, orderer_ips), daemon=True).start()
+                threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
             except Exception as e:
                 logger.error(f"Exception during accept: {e}")
                 break
@@ -85,4 +88,4 @@ if __name__ == '__main__':
         sys.exit(1)
     orderer_ips = sys.argv[1].split(',')
 
-    start_endorser(orderer_ips)
+    start_endorser()

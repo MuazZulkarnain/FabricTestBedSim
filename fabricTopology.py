@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
-import argparse  # Added for command-line argument parsing
+import argparse  # For command-line argument parsing
 from mininet.net import Mininet
 from mininet.node import Controller, OVSKernelSwitch
 from mininet.log import setLogLevel, info
@@ -15,97 +15,126 @@ def fabricTopology(num_clients):
     info("*** Creating controller\n")
     c0 = net.addController('c0')
 
-    info("*** Creating hosts\n")
+    info("*** Creating hosts and switches for each organization\n")
 
-    # Orderer Organization
-    orderer_org = []
-    for i in range(1, 4):
-        orderer = net.addHost(f'orderer{i}', ip=f'10.0.1.{i}/24')
-        orderer_org.append(orderer)
+    # Organization 1
+    org1_endorser = net.addHost('endorser1', ip='10.1.1.1/24')
+    org1_committer = net.addHost('committer1', ip='10.1.1.2/24')
+    org1_switch = net.addSwitch('s1')
 
-    # Peer Organizations
-    peer_orgs = []
-    for org in range(1, 4):
-        subnet_num = org + 1
-        endorser = net.addHost(f'endorser{org}', ip=f'10.0.{subnet_num}.1/24')
-        committer = net.addHost(f'committer{org}', ip=f'10.0.{subnet_num}.2/24')
-        peer_orgs.append((endorser, committer))
+    # Organization 2
+    org2_endorser = net.addHost('endorser2', ip='10.1.2.1/24')
+    org2_committer = net.addHost('committer2', ip='10.1.2.2/24')
+    org2_switch = net.addSwitch('s2')
 
-    # Client Nodes
+    # Organization 3
+    org3_endorser = net.addHost('endorser3', ip='10.1.3.1/24')
+    org3_committer = net.addHost('committer3', ip='10.1.3.2/24')
+    org3_switch = net.addSwitch('s3')
+
+    # Organization 4 (Orderer Organization)
+    orderer1 = net.addHost('orderer1', ip='10.1.4.1/24')
+    orderer2 = net.addHost('orderer2', ip='10.1.4.2/24')
+    orderer3 = net.addHost('orderer3', ip='10.1.4.3/24')
+    org4_switch = net.addSwitch('s4')
+
+    # Client Nodes (External)
     client_nodes = []
-    starting_subnet = 5  # Starting subnet number for clients
+    starting_subnet = 10  # Starting subnet number for clients
     for i in range(num_clients):
         subnet_num = starting_subnet + i  # Ensure each client is on its own subnet
-        client = net.addHost(f'client{i+1}', ip=f'10.0.{subnet_num}.1/24')
+        client = net.addHost(f'client{i+1}', ip=f'10.1.{subnet_num}.1/24')
         client_nodes.append(client)
 
-    info("*** Creating switches\n")
-    switches = []
-    total_switches = 4 + num_clients  # Adjust total switches based on number of clients
-    for i in range(1, total_switches + 1):
-        switch = net.addSwitch(f's{i}')
-        switches.append(switch)
+    client_switches = []
+    for i in range(num_clients):
+        switch = net.addSwitch(f'cs{i+1}')
+        client_switches.append(switch)
 
-    info("*** Creating router\n")
+    # Central Router
     router = net.addHost('router')
 
-    info("*** Creating links\n")
+    info("*** Creating links within organizations\n")
+    # Org1 Links
+    net.addLink(org1_endorser, org1_switch)
+    net.addLink(org1_committer, org1_switch)
 
-    # Connect orderer nodes to switch s1
-    for orderer in orderer_org:
-        net.addLink(orderer, switches[0])
+    # Org2 Links
+    net.addLink(org2_endorser, org2_switch)
+    net.addLink(org2_committer, org2_switch)
 
-    # Connect peer organization nodes to their respective switches
-    for idx, (endorser, committer) in enumerate(peer_orgs):
-        net.addLink(endorser, switches[idx + 1])
-        net.addLink(committer, switches[idx + 1])
+    # Org3 Links
+    net.addLink(org3_endorser, org3_switch)
+    net.addLink(org3_committer, org3_switch)
 
-    # Connect client nodes to their respective switches
+    # Org4 Links (Orderer Organization)
+    net.addLink(orderer1, org4_switch)
+    net.addLink(orderer2, org4_switch)
+    net.addLink(orderer3, org4_switch)
+
+    info("*** Connecting client nodes to their switches\n")
     for idx, client in enumerate(client_nodes):
-        net.addLink(client, switches[4 + idx])  # Switches s5 onwards
+        net.addLink(client, client_switches[idx])
 
-    # Connect switches to router
-    for idx, switch in enumerate(switches):
-        net.addLink(switch, router)
+    info("*** Connecting organization and client switches to the router\n")
+    net.addLink(org1_switch, router, intfName2='router-eth1')
+    net.addLink(org2_switch, router, intfName2='router-eth2')
+    net.addLink(org3_switch, router, intfName2='router-eth3')
+    net.addLink(org4_switch, router, intfName2='router-eth4')
+
+    for idx, cswitch in enumerate(client_switches):
+        net.addLink(cswitch, router, intfName2=f'router-eth{5+idx}')
 
     info("*** Building network\n")
     net.build()
     c0.start()
-    for switch in switches:
-        switch.start([c0])
+    org1_switch.start([c0])
+    org2_switch.start([c0])
+    org3_switch.start([c0])
+    org4_switch.start([c0])
+    for cswitch in client_switches:
+        cswitch.start([c0])
 
     info("*** Configuring router\n")
-
-    # Enable IP forwarding on the router
     router.cmd('sysctl -w net.ipv4.ip_forward=1')
 
     # Assign IP addresses to router interfaces
-    for idx, switch in enumerate(switches):
-        iface = f'router-eth{idx}'
-        subnet_num = idx + 1  # Subnets 10.0.1.0/24 onwards
-        router_ip = f'10.0.{subnet_num}.254/24'
-        router.cmd(f'ifconfig {iface} {router_ip}')
+    router.cmd('ifconfig router-eth1 10.1.1.254/24')
+    router.cmd('ifconfig router-eth2 10.1.2.254/24')
+    router.cmd('ifconfig router-eth3 10.1.3.254/24')
+    router.cmd('ifconfig router-eth4 10.1.4.254/24')
+
+    for idx, client in enumerate(client_nodes):
+        iface = f'router-eth{5+idx}'
+        subnet_num = starting_subnet + idx
+        router.cmd(f'ifconfig {iface} 10.1.{subnet_num}.254/24')
 
     info("*** Setting up default routes on hosts\n")
+    # Org1 Hosts
+    for host in [org1_endorser, org1_committer]:
+        host.cmd('ip route flush default')
+        host.cmd('ip route add default via 10.1.1.254')
 
-    # Configure default routes for orderer nodes
-    for orderer in orderer_org:
-        orderer.cmd('ip route flush default')
-        orderer.cmd('ip route add default via 10.0.1.254')
+    # Org2 Hosts
+    for host in [org2_endorser, org2_committer]:
+        host.cmd('ip route flush default')
+        host.cmd('ip route add default via 10.1.2.254')
 
-    # Configure default routes for peer nodes
-    for idx, (endorser, committer) in enumerate(peer_orgs):
-        subnet_num = idx + 2  # Subnets 10.0.2.0/24 to 10.0.4.0/24
-        gw_ip = f'10.0.{subnet_num}.254'
-        for host in [endorser, committer]:
-            host.cmd('ip route flush default')
-            host.cmd(f'ip route add default via {gw_ip}')
+    # Org3 Hosts
+    for host in [org3_endorser, org3_committer]:
+        host.cmd('ip route flush default')
+        host.cmd('ip route add default via 10.1.3.254')
 
-    # Configure default routes for client nodes
+    # Org4 Hosts (Orderers)
+    for host in [orderer1, orderer2, orderer3]:
+        host.cmd('ip route flush default')
+        host.cmd('ip route add default via 10.1.4.254')
+
+    # Client Nodes
     for idx, client in enumerate(client_nodes):
-        subnet_num = starting_subnet + idx  # Subnets 10.0.5.0/24 onwards
+        subnet_num = starting_subnet + idx
         client.cmd('ip route flush default')
-        client.cmd(f'ip route add default via 10.0.{subnet_num}.254')
+        client.cmd(f'ip route add default via 10.1.{subnet_num}.254')
 
     info("*** Creating log directories\n")
     base_log_dir = 'logs'
@@ -119,12 +148,13 @@ def fabricTopology(num_clients):
         return node_log_dir
 
     # Get the absolute path to the directory containing the scripts
-    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))  # Use sys.argv[0]
+    script_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
 
     info("*** Starting node processes\n")
 
     # Start committer node processes
-    for committer in [committer for _, committer in peer_orgs]:
+    committers = [org1_committer, org2_committer, org3_committer]
+    for committer in committers:
         node_name = committer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
@@ -132,11 +162,12 @@ def fabricTopology(num_clients):
         committer.cmd(f'python3 {script_path} > {log_file} 2>&1 &')
 
     # Collect committer IPs
-    committer_ips = [committer.IP() for _, committer in peer_orgs]
+    committer_ips = [committer.IP() for committer in committers]
     committer_ips_str = ','.join(committer_ips)
 
     # Start orderer node processes, providing the IPs of all committer nodes
-    for orderer in orderer_org:
+    orderers = [orderer1, orderer2, orderer3]
+    for orderer in orderers:
         node_name = orderer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
@@ -147,17 +178,19 @@ def fabricTopology(num_clients):
     time.sleep(2)
 
     # Start endorser node processes, providing the IPs of all orderer nodes
-    orderer_ips = [orderer.IP() for orderer in orderer_org]
+    orderer_ips = [orderer.IP() for orderer in orderers]
     orderer_ips_str = ','.join(orderer_ips)
-    for endorser in [endorser for endorser, _ in peer_orgs]:
+
+    endorsers = [org1_endorser, org2_endorser, org3_endorser]
+    for endorser in endorsers:
         node_name = endorser.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
         script_path = os.path.join(script_dir, 'endorser_node.py')
         endorser.cmd(f'python3 {script_path} {orderer_ips_str} > {log_file} 2>&1 &')
 
-    # Start client node processes, providing the IPs of all endorser nodes
-    endorser_ips = [endorser.IP() for endorser, _ in peer_orgs]
+    # Start client node processes, providing the IPs of all endorsers
+    endorser_ips = [endorser.IP() for endorser in endorsers]
     endorser_ips_str = ','.join(endorser_ips)
     for client in client_nodes:
         node_name = client.name
@@ -169,7 +202,7 @@ def fabricTopology(num_clients):
     info("*** All node processes started\n")
 
     # Let the simulation run for a specified duration
-    simulation_time = 30  # Keep at 60 seconds or adjust as needed
+    simulation_time = 60  # Adjust as needed
     info(f"*** Running simulation for {simulation_time} seconds\n")
     time.sleep(simulation_time)
 
