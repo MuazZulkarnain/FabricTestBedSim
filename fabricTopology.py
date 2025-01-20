@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 
-import sys  # Import sys to use sys.argv[0]
+import sys
 from mininet.net import Mininet
 from mininet.node import Controller, OVSKernelSwitch
 from mininet.log import setLogLevel, info
@@ -30,9 +30,15 @@ def fabricTopology():
         committer = net.addHost(f'committer{org}', ip=f'10.0.{subnet_num}.2/24')
         peer_orgs.append((endorser, committer))
 
+    # Client Nodes
+    client_nodes = []
+    for i in range(1, 4):
+        client = net.addHost(f'client{i}', ip=f'10.0.{i+4}.1/24')  # Subnets 10.0.5.0/24 to 10.0.7.0/24
+        client_nodes.append(client)
+
     info("*** Creating switches\n")
     switches = []
-    for i in range(1, 5):
+    for i in range(1, 8):  # Increased to accommodate client subnets
         switch = net.addSwitch(f's{i}')
         switches.append(switch)
 
@@ -49,6 +55,10 @@ def fabricTopology():
     for idx, (endorser, committer) in enumerate(peer_orgs):
         net.addLink(endorser, switches[idx+1])
         net.addLink(committer, switches[idx+1])
+
+    # Connect client nodes to their respective switches
+    for idx, client in enumerate(client_nodes):
+        net.addLink(client, switches[idx + 4])  # Switches s4, s5, s6
 
     # Connect switches to router
     for idx, switch in enumerate(switches):
@@ -68,7 +78,7 @@ def fabricTopology():
     # Assign IP addresses to router interfaces
     for idx, switch in enumerate(switches):
         iface = f'router-eth{idx}'
-        subnet_num = idx + 1  # Subnets 10.0.1.0/24 to 10.0.4.0/24
+        subnet_num = idx + 1  # Subnets 10.0.1.0/24 to 10.0.7.0/24
         router_ip = f'10.0.{subnet_num}.254/24'
         router.cmd(f'ifconfig {iface} {router_ip}')
 
@@ -86,6 +96,12 @@ def fabricTopology():
         for host in [endorser, committer]:
             host.cmd('ip route flush default')
             host.cmd(f'ip route add default via {gw_ip}')
+
+    # Configure default routes for client nodes
+    for idx, client in enumerate(client_nodes):
+        subnet_num = idx + 5  # Subnets 10.0.5.0/24 to 10.0.7.0/24
+        client.cmd('ip route flush default')
+        client.cmd(f'ip route add default via 10.0.{subnet_num}.254')
 
     info("*** Creating log directories\n")
     base_log_dir = 'logs'
@@ -111,17 +127,17 @@ def fabricTopology():
         script_path = os.path.join(script_dir, 'committer_node.py')
         committer.cmd(f'python3 {script_path} > {log_file} 2>&1 &')
 
-    # Collect committer IPs (assuming one committer node for simplicity)
+    # Collect committer IPs
     committer_ips = [committer.IP() for _, committer in peer_orgs]
-    committer_ip = committer_ips[0]  # For simplicity, use the first committer's IP for all orderers
+    committer_ips_str = ','.join(committer_ips)
 
-    # Start orderer node processes, providing the committer's IP
+    # Start orderer node processes, providing the IPs of all committer nodes
     for orderer in orderer_org:
         node_name = orderer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
         script_path = os.path.join(script_dir, 'orderer_node.py')
-        orderer.cmd(f'python3 {script_path} {committer_ip} > {log_file} 2>&1 &')
+        orderer.cmd(f'python3 {script_path} {committer_ips_str} > {log_file} 2>&1 &')
 
     # Let the orderers and committers start
     time.sleep(2)
@@ -136,10 +152,20 @@ def fabricTopology():
         script_path = os.path.join(script_dir, 'endorser_node.py')
         endorser.cmd(f'python3 {script_path} {orderer_ips_str} > {log_file} 2>&1 &')
 
+    # Start client node processes, providing the IPs of all endorser nodes
+    endorser_ips = [endorser.IP() for endorser, _ in peer_orgs]
+    endorser_ips_str = ','.join(endorser_ips)
+    for client in client_nodes:
+        node_name = client.name
+        node_log_dir = create_log_dir(node_name)
+        log_file = os.path.join(node_log_dir, f'{node_name}.log')
+        script_path = os.path.join(script_dir, 'client_node.py')
+        client.cmd(f'python3 {script_path} {endorser_ips_str} > {log_file} 2>&1 &')
+
     info("*** All node processes started\n")
 
     # Let the simulation run for a specified duration
-    simulation_time = 60  # Increased to 60 seconds
+    simulation_time = 30  # Keep at 60 seconds or adjust as needed
     info(f"*** Running simulation for {simulation_time} seconds\n")
     time.sleep(simulation_time)
 

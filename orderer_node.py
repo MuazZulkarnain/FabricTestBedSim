@@ -5,6 +5,7 @@ import threading
 import sys
 import logging
 import signal
+import random  # For selecting committer nodes
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[Orderer] %(message)s')
@@ -12,35 +13,40 @@ logger = logging.getLogger()
 
 HOST = '0.0.0.0'    # Listen on all interfaces within the namespace
 PORT = 7050         # Port for the orderer node to listen for endorsers
-COMMITTER_PORT = 7051  # Port for connecting to the committer node
+COMMITTER_PORT = 7051  # Port for connecting to committer nodes
 
 def send_to_committer(transaction_data):
+    # Randomly select a committer IP
+    COMMITTER_IP = random.choice(committer_ips)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((COMMITTER_IP, COMMITTER_PORT))
             s.sendall(transaction_data.encode())
+            logger.info(f"Sent transaction to committer at {COMMITTER_IP}:{COMMITTER_PORT}")
             response = s.recv(1024)
             if response:
-                logger.info(f"Received from committer: {response.decode()}")
+                logger.info(f"Received from committer {COMMITTER_IP}: {response.decode()}")
             else:
-                logger.info("No response from committer")
+                logger.info(f"No response from committer {COMMITTER_IP}")
     except Exception as e:
-        logger.error(f"Failed to send transaction to committer: {e}")
+        logger.error(f"Failed to send transaction to committer {COMMITTER_IP}: {e}")
 
-def handle_client(conn, addr):
-    logger.info(f"Connection from {addr}")
+def handle_endorser(conn, addr):
+    logger.info(f"Connection from endorser at {addr}")
     try:
         data = conn.recv(1024)
         if data:
             message = data.decode()
-            logger.info(f"Received data from endorser: {message}")
+            logger.info(f"Received endorsed transaction: {message}")
             # Simulate ordering service processing
+            logger.info("Ordering the transaction")
+            # Send a response back to the endorser
             conn.sendall(b'Orderer processed the transaction')
 
-            # Forward the transaction to the committer
+            # Forward the transaction to a committer node
             send_to_committer(message)
     except Exception as e:
-        logger.error(f"Exception while handling client {addr}: {e}")
+        logger.error(f"Exception while handling endorser {addr}: {e}")
     finally:
         conn.close()
 
@@ -57,11 +63,13 @@ def start_orderer(host, port):
         signal.signal(signal.SIGINT, signal_handler)
         signal.signal(signal.SIGTERM, signal_handler)
 
+        logger.info(f"Possible committers: {committer_ips}")
+
         while True:
             try:
                 conn, addr = server.accept()
                 # Handle each endorser connection in a new thread
-                threading.Thread(target=handle_client, args=(conn, addr), daemon=True).start()
+                threading.Thread(target=handle_endorser, args=(conn, addr), daemon=True).start()
             except Exception as e:
                 logger.error(f"Exception during accept: {e}")
                 break
@@ -77,9 +85,7 @@ def signal_handler(sig, frame):
 
 if __name__ == '__main__':
     if len(sys.argv) != 2:
-        logger.error("Usage: orderer_node.py <committer_ip>")
+        logger.error("Usage: orderer_node.py <committer_ips>")
         sys.exit(1)
-    COMMITTER_IP = sys.argv[1]
-    logger.info(f"Connecting to committer at {COMMITTER_IP}:{COMMITTER_PORT}")
-
+    committer_ips = sys.argv[1].split(',')
     start_orderer(HOST, PORT)
