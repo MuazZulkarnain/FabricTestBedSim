@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 
 import sys
+import argparse  # Added for command-line argument parsing
 from mininet.net import Mininet
 from mininet.node import Controller, OVSKernelSwitch
 from mininet.log import setLogLevel, info
@@ -8,7 +9,7 @@ from mininet.link import TCLink
 import time
 import os
 
-def fabricTopology():
+def fabricTopology(num_clients):
     net = Mininet(controller=Controller, switch=OVSKernelSwitch, link=TCLink, autoSetMacs=True)
 
     info("*** Creating controller\n")
@@ -32,13 +33,16 @@ def fabricTopology():
 
     # Client Nodes
     client_nodes = []
-    for i in range(1, 4):
-        client = net.addHost(f'client{i}', ip=f'10.0.{i+4}.1/24')  # Subnets 10.0.5.0/24 to 10.0.7.0/24
+    starting_subnet = 5  # Starting subnet number for clients
+    for i in range(num_clients):
+        subnet_num = starting_subnet + i  # Ensure each client is on its own subnet
+        client = net.addHost(f'client{i+1}', ip=f'10.0.{subnet_num}.1/24')
         client_nodes.append(client)
 
     info("*** Creating switches\n")
     switches = []
-    for i in range(1, 8):  # Increased to accommodate client subnets
+    total_switches = 4 + num_clients  # Adjust total switches based on number of clients
+    for i in range(1, total_switches + 1):
         switch = net.addSwitch(f's{i}')
         switches.append(switch)
 
@@ -53,12 +57,12 @@ def fabricTopology():
 
     # Connect peer organization nodes to their respective switches
     for idx, (endorser, committer) in enumerate(peer_orgs):
-        net.addLink(endorser, switches[idx+1])
-        net.addLink(committer, switches[idx+1])
+        net.addLink(endorser, switches[idx + 1])
+        net.addLink(committer, switches[idx + 1])
 
     # Connect client nodes to their respective switches
     for idx, client in enumerate(client_nodes):
-        net.addLink(client, switches[idx + 4])  # Switches s4, s5, s6
+        net.addLink(client, switches[4 + idx])  # Switches s5 onwards
 
     # Connect switches to router
     for idx, switch in enumerate(switches):
@@ -78,7 +82,7 @@ def fabricTopology():
     # Assign IP addresses to router interfaces
     for idx, switch in enumerate(switches):
         iface = f'router-eth{idx}'
-        subnet_num = idx + 1  # Subnets 10.0.1.0/24 to 10.0.7.0/24
+        subnet_num = idx + 1  # Subnets 10.0.1.0/24 onwards
         router_ip = f'10.0.{subnet_num}.254/24'
         router.cmd(f'ifconfig {iface} {router_ip}')
 
@@ -99,7 +103,7 @@ def fabricTopology():
 
     # Configure default routes for client nodes
     for idx, client in enumerate(client_nodes):
-        subnet_num = idx + 5  # Subnets 10.0.5.0/24 to 10.0.7.0/24
+        subnet_num = starting_subnet + idx  # Subnets 10.0.5.0/24 onwards
         client.cmd('ip route flush default')
         client.cmd(f'ip route add default via 10.0.{subnet_num}.254')
 
@@ -175,5 +179,11 @@ def fabricTopology():
     info("*** Simulation complete. Logs are stored in the 'logs' directory.\n")
 
 if __name__ == '__main__':
-        setLogLevel('info')
-        fabricTopology()
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(description='Mininet Hyperledger Fabric Topology')
+    parser.add_argument('-c', '--clients', type=int, default=3,
+                        help='Number of client nodes to spawn (default: 3)')
+    args = parser.parse_args()
+
+    setLogLevel('info')
+    fabricTopology(args.clients)
