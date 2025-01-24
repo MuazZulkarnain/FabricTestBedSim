@@ -5,6 +5,7 @@ import sys
 import time
 import random
 import logging
+import hashlib  # Import hashlib for SHA-256
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[Client] %(message)s')
@@ -27,6 +28,7 @@ def wait_for_endorser(endorser_ip, port, timeout=30):
 
 def start_client(endorser_ips):
     logger.info("Client process started")
+    transaction_counter = 0  # Counter to create unique transactions
     try:
         while True:
             # Randomly select an endorser IP
@@ -41,10 +43,14 @@ def start_client(endorser_ips):
             try:
                 with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
                     s.connect((endorser_ip, ENDORSEMENT_PORT))
-                    # Send transaction proposal
-                    transaction_proposal = 'Transaction Proposal from Client'
-                    s.sendall(transaction_proposal.encode())
-                    logger.info(f"Sent: {transaction_proposal}")
+                    # Create a unique transaction
+                    transaction_data = f'Transaction {transaction_counter} from Client'
+                    transaction_hash = hashlib.sha256(transaction_data.encode()).hexdigest()
+                    transaction = f'{transaction_hash}:{transaction_data}'
+
+                    # Send transaction proposal (including hash)
+                    s.sendall(transaction.encode())
+                    logger.info(f"Sent transaction with hash: {transaction_hash}")
 
                     # Receive response from endorser
                     data = s.recv(1024)
@@ -52,6 +58,8 @@ def start_client(endorser_ips):
                         logger.info(f"Received from endorser: {data.decode()}")
                     else:
                         logger.info("No response from endorser")
+
+                    transaction_counter += 1  # Increment transaction counter
             except Exception as e:
                 logger.error(f"Exception occurred while communicating with endorser: {e}")
 

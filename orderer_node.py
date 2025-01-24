@@ -15,13 +15,13 @@ HOST = '0.0.0.0'    # Listen on all interfaces within the namespace
 PORT = 7050         # Port for the orderer node to listen for endorsers
 COMMITTER_PORT = 7051  # Port for connecting to committer nodes
 
-def send_to_committer(transaction_data):
+def send_to_committer(transaction):
     # Randomly select a committer IP
     COMMITTER_IP = random.choice(committer_ips)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((COMMITTER_IP, COMMITTER_PORT))
-            s.sendall(transaction_data.encode())
+            s.sendall(transaction.encode())
             logger.info(f"Sent transaction to committer at {COMMITTER_IP}:{COMMITTER_PORT}")
             response = s.recv(1024)
             if response:
@@ -36,15 +36,22 @@ def handle_endorser(conn, addr):
     try:
         data = conn.recv(1024)
         if data:
-            message = data.decode()
-            logger.info(f"Received endorsed transaction: {message}")
+            transaction = data.decode()
+            # Extract hash and data
+            transaction_parts = transaction.split(':', 1)
+            if len(transaction_parts) != 2:
+                logger.error("Invalid transaction format received from endorser")
+                conn.sendall(b'Invalid transaction format')
+                return
+            transaction_hash, transaction_data = transaction_parts
+            logger.info(f"Received endorsed transaction with hash: {transaction_hash}")
             # Simulate ordering service processing
             logger.info("Ordering the transaction")
             # Send a response back to the endorser
             conn.sendall(b'Orderer processed the transaction')
 
-            # Forward the transaction to a committer node
-            send_to_committer(message)
+            # Forward the transaction to a committer node (include hash and data)
+            send_to_committer(transaction)
     except Exception as e:
         logger.error(f"Exception while handling endorser {addr}: {e}")
     finally:

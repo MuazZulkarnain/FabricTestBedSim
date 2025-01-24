@@ -15,13 +15,13 @@ logger = logging.getLogger()
 ORDERER_PORT = 7050  # Port to connect to on orderer nodes (from endorser to orderer)
 CLIENT_PORT = 7052   # Port to listen on for client connections (from client to endorser)
 
-def send_to_orderer(transaction_data):
+def send_to_orderer(transaction):
     # Randomly select an orderer IP
     orderer_ip = random.choice(orderer_ips)
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((orderer_ip, ORDERER_PORT))
-            s.sendall(transaction_data.encode())
+            s.sendall(transaction.encode())
             logger.info(f"Sent transaction to orderer at {orderer_ip}:{ORDERER_PORT}")
             response = s.recv(1024)
             if response:
@@ -36,14 +36,22 @@ def handle_client(conn, addr):
     try:
         data = conn.recv(1024)
         if data:
-            transaction_proposal = data.decode()
-            logger.info(f"Received transaction proposal: {transaction_proposal}")
+            transaction = data.decode()
+            # Extract hash and data
+            transaction_parts = transaction.split(':', 1)
+            if len(transaction_parts) != 2:
+                logger.error("Invalid transaction format received from client")
+                conn.sendall(b'Invalid transaction format')
+                return
+            transaction_hash, transaction_data = transaction_parts
+            logger.info(f"Received transaction with hash: {transaction_hash}")
+
             # Simulate endorsing the transaction
             logger.info("Endorsing the transaction")
             # Send a response back to the client
             conn.sendall(b'Transaction endorsed by Endorser')
-            # Forward the endorsed transaction to an orderer
-            send_to_orderer(transaction_proposal)
+            # Forward the endorsed transaction to an orderer (include hash and data)
+            send_to_orderer(transaction)
     except Exception as e:
         logger.error(f"Exception while handling client {addr}: {e}")
     finally:

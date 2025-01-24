@@ -6,16 +6,18 @@ import logging
 import signal
 import sys
 import time
+import hashlib  # Import hashlib for SHA-256
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[Committer %(name)s] %(message)s')
 logger = logging.getLogger()
+logger.name = ""  # Will be set to the committer's name
 
 HOST = '0.0.0.0'    # Listen on all interfaces within the namespace
 ORDERER_PORT = 7051         # Port for the committer node to listen for orderers
 GOSSIP_PORT = 7053          # Port for gossip communication with other committers
 
-ledger = []  # Ledger to store committed transactions
+ledger = {}  # Ledger to store committed transactions {hash: data}
 committers_ips = []  # List of other committer IPs for gossip
 
 def handle_orderer(conn, addr):
@@ -24,9 +26,16 @@ def handle_orderer(conn, addr):
         data = conn.recv(1024)
         if data:
             transaction = data.decode()
-            logger.info(f"Received transaction: {transaction}")
+            # Extract hash and data
+            transaction_parts = transaction.split(':', 1)
+            if len(transaction_parts) != 2:
+                logger.error("Invalid transaction format received from orderer")
+                conn.sendall(b'Invalid transaction format')
+                return
+            transaction_hash, transaction_data = transaction_parts
+            logger.info(f"Received transaction with hash: {transaction_hash}")
             # Simulate committing the transaction
-            commit_transaction(transaction)
+            commit_transaction(transaction_hash, transaction_data)
             # Send a response back to the orderer
             conn.sendall(b'Transaction committed')
     except Exception as e:
@@ -39,32 +48,39 @@ def handle_gossip(conn, addr):
         data = conn.recv(1024)
         if data:
             transaction = data.decode()
-            logger.info(f"Received transaction via gossip: {transaction}")
+            # Extract hash and data
+            transaction_parts = transaction.split(':', 1)
+            if len(transaction_parts) != 2:
+                logger.error("Invalid transaction format received via gossip")
+                return
+            transaction_hash, transaction_data = transaction_parts
+            logger.info(f"Received transaction via gossip with hash: {transaction_hash}")
             # Add the transaction to the ledger if not already present
-            if transaction not in ledger:
-                ledger.append(transaction)
-                logger.info(f"Transaction added to ledger via gossip: {transaction}")
-                # Optionally, gossip the transaction further (to prevent loops, we can add logic)
-                # gossip_transaction(transaction)
+            if transaction_hash not in ledger:
+                ledger[transaction_hash] = transaction_data
+                logger.info(f"Transaction added to ledger via gossip: {transaction_hash}")
+                # Optionally, gossip the transaction further
+                gossip_transaction(transaction_hash, transaction_data)
             else:
-                logger.info(f"Transaction already in ledger: {transaction}")
+                logger.info(f"Transaction already in ledger: {transaction_hash}")
     except Exception as e:
         logger.error(f"Exception while handling gossip from {addr}: {e}")
     finally:
         conn.close()
 
-def commit_transaction(transaction):
-    if transaction not in ledger:
+def commit_transaction(transaction_hash, transaction_data):
+    if transaction_hash not in ledger:
         # Simulate some processing time
         time.sleep(1)
-        ledger.append(transaction)
-        logger.info(f"Committed transaction: {transaction}")
+        ledger[transaction_hash] = transaction_data
+        logger.info(f"Committed transaction: {transaction_hash}")
         # Gossip the new transaction to other committers
-        gossip_transaction(transaction)
+        gossip_transaction(transaction_hash, transaction_data)
     else:
-        logger.info(f"Transaction already committed: {transaction}")
+        logger.info(f"Transaction already committed: {transaction_hash}")
 
-def gossip_transaction(transaction):
+def gossip_transaction(transaction_hash, transaction_data):
+    transaction = f"{transaction_hash}:{transaction_data}"
     for ip in committers_ips:
         threading.Thread(target=send_gossip, args=(ip, transaction), daemon=True).start()
 
@@ -121,6 +137,7 @@ def start_gossip_listener():
 
 def signal_handler(sig, frame):
     logger.info('Shutting down committer...')
+    logger.info(f"Final ledger: {ledger}")
     orderer_server.close()
     gossip_server.close()
     sys.exit(0)
@@ -136,6 +153,7 @@ def main():
     # Remove own IP from the list to prevent sending gossip to itself
     own_ip = get_host_ip()
     committers_ips = [ip for ip in committers_ips if ip != own_ip]
+    logger.name = own_ip  # Set logger name to committer's IP
     logger.info(f"Other committers for gossip: {committers_ips}")
 
     # Setup signal handlers for graceful shutdown
