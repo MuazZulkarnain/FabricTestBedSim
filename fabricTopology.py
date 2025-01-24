@@ -152,14 +152,16 @@ def fabricTopology(num_clients):
 
     info("*** Starting node processes\n")
 
-    # Start committer node processes
+    # Start committer node processes, providing the IPs of all committer nodes
     committers = [org1_committer, org2_committer, org3_committer]
+    committer_ips = [committer.IP() for committer in committers]
+    committer_ips_str = ','.join(committer_ips)
     for committer in committers:
         node_name = committer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
         script_path = os.path.join(script_dir, 'committer_node.py')
-        committer.cmd(f'python3 {script_path} > {log_file} 2>&1 &')
+        committer.cmd(f'python3 {script_path} {committer_ips_str} > {log_file} 2>&1 &')
 
     # Collect committer IPs
     committer_ips = [committer.IP() for committer in committers]
