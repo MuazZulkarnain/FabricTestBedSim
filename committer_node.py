@@ -6,180 +6,273 @@ import logging
 import signal
 import sys
 import time
-import hashlib  # Import hashlib for SHA-256
+import hashlib
+import json
+import numpy as np
+from collections import deque
 
 # Setup logging
 logging.basicConfig(level=logging.INFO, format='[Committer %(name)s] %(message)s')
 logger = logging.getLogger()
-logger.name = ""  # Will be set to the committer's name
+logger.name = ""
 
-HOST = '0.0.0.0'    # Listen on all interfaces within the namespace
-ORDERER_PORT = 7051         # Port for the committer node to listen for orderers
-GOSSIP_PORT = 7053          # Port for gossip communication with other committers
+HOST = '0.0.0.0'
+ORDERER_PORT = 7051
+GOSSIP_PORT = 7053
 
-ledger = {}  # Ledger to store committed transactions {hash: data}
-committers_ips = []  # List of other committer IPs for gossip
+class CommitterMetrics:
+    def __init__(self, metrics_file):
+        self.metrics_file = metrics_file
+        self.start_time = time.time()
+        self.lock = threading.Lock()
+        
+        # Transaction metrics
+        self.transactions_received = 0
+        self.transactions_committed = 0
+        self.transactions_failed = 0
+        self.commit_times = []
+        
+        # Throughput tracking
+        self.throughput_window = deque(maxlen=60)
+        self.last_throughput_time = self.start_time
+        
+        # Gossip metrics
+        self.gossip_messages_sent = 0
+        self.gossip_messages_received = 0
+        self.gossip_failures = 0
+        
+        # Ledger metrics
+        self.ledger_size = 0
+        self.duplicate_transactions = 0
 
-def handle_orderer(conn, addr):
+    def record_transaction_received(self):
+        with self.lock:
+            self.transactions_received += 1
+
+    def record_transaction_committed(self, commit_time):
+        with self.lock:
+            self.transactions_committed += 1
+            self.commit_times.append(commit_time)
+            self.ledger_size = len(ledger)
+            
+            current_time = time.time()
+            elapsed_time = current_time - self.last_throughput_time
+            
+            if elapsed_time >= 1.0:
+                throughput = self.transactions_committed / (current_time - self.start_time)
+                self.throughput_window.append(throughput)
+                self.last_throughput_time = current_time
+
+    def record_transaction_failed(self):
+        with self.lock:
+            self.transactions_failed += 1
+
+    def record_gossip_sent(self):
+        with self.lock:
+            self.gossip_messages_sent += 1
+
+    def record_gossip_received(self):
+        with self.lock:
+            self.gossip_messages_received += 1
+
+    def record_gossip_failed(self):
+        with self.lock:
+            self.gossip_failures += 1
+
+    def record_duplicate_transaction(self):
+        with self.lock:
+            self.duplicate_transactions += 1
+
+    def save_metrics(self):
+        with self.lock:
+            metrics = {
+                'timing': {
+                    'start_time': self.start_time,
+                    'current_time': time.time(),
+                    'uptime': time.time() - self.start_time
+                },
+                'transactions': {
+                    'received': self.transactions_received,
+                    'committed': self.transactions_committed,
+                    'failed': self.transactions_failed,
+                    'duplicates': self.duplicate_transactions,
+                    'success_rate': self.transactions_committed / max(self.transactions_received, 1)
+                },
+                'performance': {
+                    'average_commit_time': np.mean(self.commit_times) if self.commit_times else 0,
+                    'max_commit_time': max(self.commit_times) if self.commit_times else 0,
+                    'commit_time_std_dev': np.std(self.commit_times) if self.commit_times else 0,
+                    'average_throughput': np.mean(list(self.throughput_window)) if self.throughput_window else 0,
+                    'throughput_std_dev': np.std(list(self.throughput_window)) if self.throughput_window else 0
+                },
+                'gossip': {
+                    'messages_sent': self.gossip_messages_sent,
+                    'messages_received': self.gossip_messages_received,
+                    'failures': self.gossip_failures
+                },
+                'ledger': {
+                    'size': self.ledger_size,
+                    'unique_transactions': len(ledger)
+                }
+            }
+
+            with open(self.metrics_file, 'w') as f:
+                json.dump(metrics, f, indent=4)
+            
+            return metrics
+
+def handle_orderer(conn, addr, metrics):
     logger.info(f"Connection from orderer at {addr}")
+    start_time = time.time()
     try:
         data = conn.recv(1024)
         if data:
+            metrics.record_transaction_received()
             transaction = data.decode()
-            # Extract hash and data
             transaction_parts = transaction.split(':', 1)
             if len(transaction_parts) != 2:
                 logger.error("Invalid transaction format received from orderer")
                 conn.sendall(b'Invalid transaction format')
+                metrics.record_transaction_failed()
                 return
+            
             transaction_hash, transaction_data = transaction_parts
             logger.info(f"Received transaction with hash: {transaction_hash}")
-            # Simulate committing the transaction
-            commit_transaction(transaction_hash, transaction_data)
-            # Send a response back to the orderer
+            
+            commit_transaction(transaction_hash, transaction_data, metrics)
             conn.sendall(b'Transaction committed')
+            
     except Exception as e:
+        metrics.record_transaction_failed()
         logger.error(f"Exception while handling transaction from {addr}: {e}")
     finally:
         conn.close()
 
-def handle_gossip(conn, addr):
+def handle_gossip(conn, addr, metrics):
     try:
         data = conn.recv(1024)
         if data:
+            metrics.record_gossip_received()
             transaction = data.decode()
-            # Extract hash and data
             transaction_parts = transaction.split(':', 1)
             if len(transaction_parts) != 2:
                 logger.error("Invalid transaction format received via gossip")
+                metrics.record_transaction_failed()
                 return
+            
             transaction_hash, transaction_data = transaction_parts
             logger.info(f"Received transaction via gossip with hash: {transaction_hash}")
-            # Add the transaction to the ledger if not already present
+            
             if transaction_hash not in ledger:
-                ledger[transaction_hash] = transaction_data
-                logger.info(f"Transaction added to ledger via gossip: {transaction_hash}")
-                # Optionally, gossip the transaction further
-                gossip_transaction(transaction_hash, transaction_data)
+                commit_transaction(transaction_hash, transaction_data, metrics)
             else:
+                metrics.record_duplicate_transaction()
                 logger.info(f"Transaction already in ledger: {transaction_hash}")
     except Exception as e:
+        metrics.record_gossip_failed()
         logger.error(f"Exception while handling gossip from {addr}: {e}")
     finally:
         conn.close()
 
-def commit_transaction(transaction_hash, transaction_data):
+def commit_transaction(transaction_hash, transaction_data, metrics):
+    start_time = time.time()
     if transaction_hash not in ledger:
-        # Simulate some processing time
-        time.sleep(1)
+        time.sleep(1)  # Simulate processing
         ledger[transaction_hash] = transaction_data
+        commit_time = time.time() - start_time
+        metrics.record_transaction_committed(commit_time)
         logger.info(f"Committed transaction: {transaction_hash}")
-        # Gossip the new transaction to other committers
-        gossip_transaction(transaction_hash, transaction_data)
+        gossip_transaction(transaction_hash, transaction_data, metrics)
     else:
+        metrics.record_duplicate_transaction()
         logger.info(f"Transaction already committed: {transaction_hash}")
 
-def gossip_transaction(transaction_hash, transaction_data):
+def gossip_transaction(transaction_hash, transaction_data, metrics):
     transaction = f"{transaction_hash}:{transaction_data}"
     for ip in committers_ips:
-        threading.Thread(target=send_gossip, args=(ip, transaction), daemon=True).start()
+        threading.Thread(target=send_gossip, args=(ip, transaction, metrics), daemon=True).start()
 
-def send_gossip(ip, transaction):
+def send_gossip(ip, transaction, metrics):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.connect((ip, GOSSIP_PORT))
             s.sendall(transaction.encode())
+            metrics.record_gossip_sent()
             logger.info(f"Gossiped transaction to committer at {ip}:{GOSSIP_PORT}")
     except Exception as e:
+        metrics.record_gossip_failed()
         logger.error(f"Failed to gossip transaction to committer {ip}: {e}")
 
-def start_orderer_listener():
-    global orderer_server  # So it can be accessed in the signal handler
-    orderer_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        orderer_server.bind((HOST, ORDERER_PORT))
-        orderer_server.listen()
-        logger.info(f"Listening for orderers on {HOST}:{ORDERER_PORT}")
+# ... [Previous helper functions remain the same] ...
 
+def start_committer(metrics_file):
+    metrics = CommitterMetrics(metrics_file)
+    
+    # Start orderer listener
+    def orderer_listener():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((HOST, ORDERER_PORT))
+            server.listen()
+            logger.info(f"Listening for orderers on {HOST}:{ORDERER_PORT}")
+            
+            while True:
+                conn, addr = server.accept()
+                threading.Thread(target=handle_orderer, args=(conn, addr, metrics), daemon=True).start()
+    
+    # Start gossip listener
+    def gossip_listener():
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as server:
+            server.bind((HOST, GOSSIP_PORT))
+            server.listen()
+            logger.info(f"Listening for gossip on {HOST}:{GOSSIP_PORT}")
+            
+            while True:
+                conn, addr = server.accept()
+                threading.Thread(target=handle_gossip, args=(conn, addr, metrics), daemon=True).start()
+    
+    # Start metrics saving thread
+    def periodic_metrics_save():
         while True:
-            try:
-                conn, addr = orderer_server.accept()
-                # Handle each orderer connection in a new thread
-                threading.Thread(target=handle_orderer, args=(conn, addr), daemon=True).start()
-            except Exception as e:
-                logger.error(f"Exception during accept on orderer listener: {e}")
-                break
-    except Exception as e:
-        logger.error(f"Failed to start orderer listener: {e}")
-    finally:
-        orderer_server.close()
-
-def start_gossip_listener():
-    global gossip_server  # So it can be accessed in the signal handler
-    gossip_server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    try:
-        gossip_server.bind((HOST, GOSSIP_PORT))
-        gossip_server.listen()
-        logger.info(f"Listening for gossip on {HOST}:{GOSSIP_PORT}")
-
-        while True:
-            try:
-                conn, addr = gossip_server.accept()
-                # Handle each gossip connection in a new thread
-                threading.Thread(target=handle_gossip, args=(conn, addr), daemon=True).start()
-            except Exception as e:
-                logger.error(f"Exception during accept on gossip listener: {e}")
-                break
-    except Exception as e:
-        logger.error(f"Failed to start gossip listener: {e}")
-    finally:
-        gossip_server.close()
-
-def signal_handler(sig, frame):
-    logger.info('Shutting down committer...')
-    logger.info(f"Final ledger: {ledger}")
-    orderer_server.close()
-    gossip_server.close()
-    sys.exit(0)
+            time.sleep(10)
+            metrics.save_metrics()
+    
+    # Start all threads
+    threading.Thread(target=orderer_listener, daemon=True).start()
+    threading.Thread(target=gossip_listener, daemon=True).start()
+    threading.Thread(target=periodic_metrics_save, daemon=True).start()
+    
+    return metrics
 
 def main():
-    if len(sys.argv) != 2:
-        logger.error("Usage: committer_node.py <committer_ips>")
+    if len(sys.argv) != 3:
+        logger.error("Usage: committer_node.py <committer_ips> <metrics_file>")
         sys.exit(1)
 
-    global committers_ips
+    global committers_ips, ledger
     committers_ips = sys.argv[1].split(',')
+    metrics_file = sys.argv[2]
+    ledger = {}
 
-    # Remove own IP from the list to prevent sending gossip to itself
     own_ip = get_host_ip()
     committers_ips = [ip for ip in committers_ips if ip != own_ip]
-    logger.name = own_ip  # Set logger name to committer's IP
+    logger.name = own_ip
     logger.info(f"Other committers for gossip: {committers_ips}")
 
-    # Setup signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
+    metrics = start_committer(metrics_file)
 
-    # Start orderer listener and gossip listener in separate threads
-    threading.Thread(target=start_orderer_listener, daemon=True).start()
-    threading.Thread(target=start_gossip_listener, daemon=True).start()
+    def cleanup(sig, frame):
+        logger.info('Shutting down committer...')
+        final_metrics = metrics.save_metrics()
+        logger.info("Final metrics saved")
+        logger.info(f"Total transactions committed: {final_metrics['transactions']['committed']}")
+        logger.info(f"Final ledger size: {final_metrics['ledger']['size']}")
+        sys.exit(0)
 
-    # Keep the main thread alive
+    signal.signal(signal.SIGINT, cleanup)
+    signal.signal(signal.SIGTERM, cleanup)
+
     while True:
         time.sleep(1)
-
-def get_host_ip():
-    # Get the IP address of the host
-    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        # Doesn't matter if the IP is reachable
-        s.connect(('10.0.0.0', 1))
-        IP = s.getsockname()[0]
-    except Exception:
-        IP = '127.0.0.1'
-    finally:
-        s.close()
-    return IP
 
 if __name__ == '__main__':
     main()

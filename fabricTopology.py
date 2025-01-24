@@ -1,15 +1,25 @@
 #!/usr/bin/env python3
 
 import sys
-import argparse  # For command-line argument parsing
+import argparse
 from mininet.net import Mininet
 from mininet.node import Controller, OVSKernelSwitch
 from mininet.log import setLogLevel, info
 from mininet.link import TCLink
 import time
 import os
+import atexit
+from metrics_logger import MetricsLogger
+from aggregate_metrics import aggregate_metrics
 
-def fabricTopology(num_clients):
+def fabricTopology(num_clients, simulation_duration):
+    # Initialize metrics logger
+    base_log_dir = 'logs'
+    metrics_logger = MetricsLogger(base_log_dir)
+    
+    # Register metrics finalizer
+    atexit.register(metrics_logger.finalize_metrics)
+
     net = Mininet(controller=Controller, switch=OVSKernelSwitch, link=TCLink, autoSetMacs=True)
 
     info("*** Creating controller\n")
@@ -40,9 +50,9 @@ def fabricTopology(num_clients):
 
     # Client Nodes (External)
     client_nodes = []
-    starting_subnet = 10  # Starting subnet number for clients
+    starting_subnet = 10
     for i in range(num_clients):
-        subnet_num = starting_subnet + i  # Ensure each client is on its own subnet
+        subnet_num = starting_subnet + i
         client = net.addHost(f'client{i+1}', ip=f'10.1.{subnet_num}.1/24')
         client_nodes.append(client)
 
@@ -137,7 +147,6 @@ def fabricTopology(num_clients):
         client.cmd(f'ip route add default via 10.1.{subnet_num}.254')
 
     info("*** Creating log directories\n")
-    base_log_dir = 'logs'
     if not os.path.exists(base_log_dir):
         os.makedirs(base_log_dir)
 
@@ -152,7 +161,7 @@ def fabricTopology(num_clients):
 
     info("*** Starting node processes\n")
 
-    # Start committer node processes, providing the IPs of all committer nodes
+    # Start committer node processes
     committers = [org1_committer, org2_committer, org3_committer]
     committer_ips = [committer.IP() for committer in committers]
     committer_ips_str = ','.join(committer_ips)
@@ -160,26 +169,24 @@ def fabricTopology(num_clients):
         node_name = committer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
+        metrics_file = os.path.join(node_log_dir, f'{node_name}_metrics.json')
         script_path = os.path.join(script_dir, 'committer_node.py')
-        committer.cmd(f'python3 {script_path} {committer_ips_str} > {log_file} 2>&1 &')
+        committer.cmd(f'python3 {script_path} {committer_ips_str} {metrics_file} > {log_file} 2>&1 &')
 
-    # Collect committer IPs
-    committer_ips = [committer.IP() for committer in committers]
-    committer_ips_str = ','.join(committer_ips)
-
-    # Start orderer node processes, providing the IPs of all committer nodes
+    # Start orderer node processes
     orderers = [orderer1, orderer2, orderer3]
     for orderer in orderers:
         node_name = orderer.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
+        metrics_file = os.path.join(node_log_dir, f'{node_name}_metrics.json')
         script_path = os.path.join(script_dir, 'orderer_node.py')
-        orderer.cmd(f'python3 {script_path} {committer_ips_str} > {log_file} 2>&1 &')
+        orderer.cmd(f'python3 {script_path} {committer_ips_str} {metrics_file} > {log_file} 2>&1 &')
 
     # Let the orderers and committers start
     time.sleep(2)
 
-    # Start endorser node processes, providing the IPs of all orderer nodes
+    # Start endorser node processes
     orderer_ips = [orderer.IP() for orderer in orderers]
     orderer_ips_str = ','.join(orderer_ips)
 
@@ -188,37 +195,53 @@ def fabricTopology(num_clients):
         node_name = endorser.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
+        metrics_file = os.path.join(node_log_dir, f'{node_name}_metrics.json')
         script_path = os.path.join(script_dir, 'endorser_node.py')
-        endorser.cmd(f'python3 {script_path} {orderer_ips_str} > {log_file} 2>&1 &')
+        endorser.cmd(f'python3 {script_path} {orderer_ips_str} {metrics_file} > {log_file} 2>&1 &')
 
-    # Start client node processes, providing the IPs of all endorsers
+    # Start client node processes
     endorser_ips = [endorser.IP() for endorser in endorsers]
     endorser_ips_str = ','.join(endorser_ips)
     for client in client_nodes:
         node_name = client.name
         node_log_dir = create_log_dir(node_name)
         log_file = os.path.join(node_log_dir, f'{node_name}.log')
+        metrics_file = os.path.join(node_log_dir, f'{node_name}_metrics.json')
         script_path = os.path.join(script_dir, 'client_node.py')
-        client.cmd(f'python3 {script_path} {endorser_ips_str} > {log_file} 2>&1 &')
+        client.cmd(f'python3 {script_path} {endorser_ips_str} {metrics_file} > {log_file} 2>&1 &')
 
     info("*** All node processes started\n")
 
-    # Let the simulation run for a specified duration
-    simulation_time = 60  # Adjust as needed
-    info(f"*** Running simulation for {simulation_time} seconds\n")
-    time.sleep(simulation_time)
+    info(f"*** Running simulation for {simulation_duration} seconds\n")
+    time.sleep(simulation_duration)
+
+    # Mark sending completion in metrics
+    metrics_logger.mark_sending_complete()
+
+    # Allow additional time for processing pending transactions
+    processing_wait_time = 10
+    info(f"*** Waiting {processing_wait_time} seconds for transaction processing to complete\n")
+    time.sleep(processing_wait_time)
+
+    # Mark processing completion in metrics
+    metrics_logger.mark_processing_complete()
 
     info("*** Stopping network\n")
     net.stop()
 
-    info("*** Simulation complete. Logs are stored in the 'logs' directory.\n")
+    # Aggregate metrics from all nodes
+    info("*** Aggregating metrics\n")
+    aggregate_metrics(base_log_dir)
+
+    info("*** Simulation complete. Logs and metrics are stored in the 'logs' directory.\n")
 
 if __name__ == '__main__':
-    # Parse command-line arguments
     parser = argparse.ArgumentParser(description='Mininet Hyperledger Fabric Topology')
     parser.add_argument('-c', '--clients', type=int, default=3,
                         help='Number of client nodes to spawn (default: 3)')
+    parser.add_argument('-t', '--time', type=int, default=60,
+                        help='Simulation duration in seconds (default: 60)')
     args = parser.parse_args()
 
     setLogLevel('info')
-    fabricTopology(args.clients)
+    fabricTopology(args.clients, args.time)
